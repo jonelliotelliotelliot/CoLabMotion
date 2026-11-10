@@ -24,7 +24,7 @@
 
 var CONFIG = {
     name: "CoLab Motion",
-    version: "1.3.1",
+    version: "1.4.1",
     assetFile: "colab-elements.aep",
     assetsFolderName: "CoLab Motion Assets",
     animatorPrefix: "CoLab"
@@ -108,8 +108,9 @@ function fail(message) {
 }
 
 /** Builds a result from a per-item loop: "<verb> 3/4 layer(s). Errors: ..." */
-function report(verb, done, total, noun, errors) {
+function report(verb, done, total, noun, errors, note) {
     var message = verb + " " + done + "/" + total + " " + noun + ".";
+    if (note) message += " " + note;
     if (errors.length) message += " Errors: " + errors.join("; ");
     return JSON.stringify({ success: done > 0, message: message });
 }
@@ -313,6 +314,142 @@ function bakeOvershoot(prop, key1, key2, easeKey) {
         prop.setValueAtTime(times[i], values[i]);
     }
     applyTemporalEase(prop, times, easeKey);
+}
+
+// "Curve" back eases: the overshoot lives in the Graph Editor handles instead
+// of an extra keyframe. One bezier segment can have only two of: a smooth
+// start, an overshoot, a smooth stop. So Back Out leaves its first key with
+// speed (like Penner's easeOutBack), Back In arrives at speed, and Back In/Out
+// adds one key at the midpoint (3 keys instead of 4).
+var BACK_CURVE = {
+    fastInfluence: 40,  // the side that carries speed; with 60 below, the peak lands near the middle
+    slowInfluence: 60   // the side that eases to a stop
+};
+
+// Graph handle height, as a multiple of the move, that overshoots by
+// `overshoot` (0.1 = 10%). The influences only shift when the peak happens.
+function handleHeightForOvershoot(overshoot) {
+    function peak(h) {
+        var best = 0;
+        for (var i = 0; i <= 200; i++) {
+            var u = i / 200, m = 1 - u;
+            var y = 3 * m * m * u * h + 3 * m * u * u + u * u * u;
+            if (y > best) best = y;
+        }
+        return best - 1;
+    }
+    var lo = 1, hi = 20; // h = 1 never overshoots
+    for (var n = 0; n < 40; n++) {
+        var mid = (lo + hi) / 2;
+        if (peak(mid) < overshoot) lo = mid; else hi = mid;
+    }
+    return (lo + hi) / 2;
+}
+
+function isSpatial(prop) {
+    var t = prop.propertyValueType;
+    return t === PropertyValueType.TwoD_SPATIAL || t === PropertyValueType.ThreeD_SPATIAL;
+}
+
+/** Per-dimension speeds (value/sec) for a handle `h` moves tall and `influence` long. */
+function launchSpeeds(v1, v2, dt, h, influence, dims) {
+    var out = [];
+    for (var d = 0; d < dims; d++) {
+        var delta = (v1 instanceof Array) ? (v2[d] - v1[d]) : (v2 - v1);
+        out.push(h * delta / (influence / 100 * dt));
+    }
+    return out;
+}
+
+function easesFor(speeds, influence) {
+    var out = [];
+    for (var d = 0; d < speeds.length; d++) out.push(new KeyframeEase(speeds[d], influence));
+    return out;
+}
+
+function zeros(n) {
+    var out = [];
+    for (var d = 0; d < n; d++) out.push(0);
+    return out;
+}
+
+/**
+ * Eases only the segment from key k1 to k2 (k1's outgoing side, k2's incoming
+ * side), so the other side of each key and any neighbouring segments keep
+ * their easing.
+ */
+function setSegmentEase(prop, k1, k2, outEase, inEase) {
+    var BEZ = KeyframeInterpolationType.BEZIER;
+    var keys = [k1, k2];
+    for (var i = 0; i < keys.length; i++) {
+        try { prop.setTemporalAutoBezierAtKey(keys[i], false); } catch (e) {}
+        try { prop.setTemporalContinuousAtKey(keys[i], false); } catch (e) {}
+    }
+    prop.setInterpolationTypeAtKey(k1, prop.keyInInterpolationType(k1), BEZ);
+    prop.setInterpolationTypeAtKey(k2, BEZ, prop.keyOutInterpolationType(k2));
+    prop.setTemporalEaseAtKey(k1, prop.keyInTemporalEase(k1), outEase);
+    prop.setTemporalEaseAtKey(k2, inEase, prop.keyOutTemporalEase(k2));
+}
+
+/** One segment that overshoots past k2 (out) or dips before k1 (in). */
+function curveSegment(prop, k1, k2, direction, overshoot) {
+    var t1 = prop.keyTime(k1), t2 = prop.keyTime(k2);
+    var dims = easeDimensions(prop, k1);
+    var h = handleHeightForOvershoot(overshoot);
+    var fast = launchSpeeds(prop.keyValue(k1), prop.keyValue(k2), t2 - t1, h, BACK_CURVE.fastInfluence, dims);
+    var still = zeros(dims);
+    if (direction === "out") {
+        setSegmentEase(prop, k1, k2, easesFor(fast, BACK_CURVE.fastInfluence), easesFor(still, BACK_CURVE.slowInfluence));
+    } else {
+        setSegmentEase(prop, k1, k2, easesFor(still, BACK_CURVE.slowInfluence), easesFor(fast, BACK_CURVE.fastInfluence));
+    }
+}
+
+/**
+ * Linked Position can't overshoot through its speed graph, so separate it
+ * into X/Y(/Z) Position and curve each one. Returns false if it can't.
+ */
+function curveOnSeparatedPosition(prop, key1, key2, easeKey) {
+    if (prop.matchName !== "ADBE Position" || !prop.isSeparationLeader) return false;
+    var layer = prop.propertyGroup(prop.propertyDepth);
+    var dims = layer.threeDLayer ? 3 : 2;
+    var t1 = prop.keyTime(key1), t2 = prop.keyTime(key2);
+    prop.dimensionsSeparated = true;
+    for (var d = 0; d < dims; d++) {
+        var f = prop.getSeparationFollower(d);
+        curveOvershoot(f, f.nearestKeyIndex(t1), f.nearestKeyIndex(t2), easeKey);
+    }
+    return true;
+}
+
+/** Two-key back ease (three for In/Out). Returns false if the property can't do it. */
+function curveOvershoot(prop, key1, key2, easeKey) {
+    if (isSpatial(prop)) return false; // speed along a motion path can't go negative
+    var cfg = EASE_CONFIGS[easeKey];
+    if (easeKey === "backIn") {
+        curveSegment(prop, key1, key2, "in", cfg.strength);
+    } else if (easeKey === "backOut") {
+        curveSegment(prop, key1, key2, "out", cfg.strength);
+    } else {
+        var t1 = prop.keyTime(key1), t2 = prop.keyTime(key2);
+        var v1 = prop.keyValue(key1), v2 = prop.keyValue(key2);
+        var mid;
+        if (v1 instanceof Array) {
+            mid = [];
+            for (var d = 0; d < v1.length; d++) mid.push((v1[d] + v2[d]) / 2);
+        } else {
+            mid = (v1 + v2) / 2;
+        }
+        var tm = (t1 + t2) / 2;
+        prop.setValueAtTime(tm, mid);
+        var km = prop.nearestKeyIndex(tm), k1 = prop.nearestKeyIndex(t1), k2 = prop.nearestKeyIndex(t2);
+        // Each half is half the move, so double the fraction to keep the same
+        // overshoot as the Keys version. Both halves meet the middle key at the
+        // same speed, so the motion stays smooth through it.
+        curveSegment(prop, k1, km, "in", cfg.strength * 2);
+        curveSegment(prop, km, k2, "out", cfg.strength * 2);
+    }
+    return true;
 }
 
 
@@ -564,7 +701,82 @@ function copyPropertyAnimation(src, dst) {
     }
 }
 
-/** Sets a parent without AE adjusting the child's transform values. */
+/** Every expression on a layer, as {path: [property indices], text, enabled}. */
+function collectExpressions(group, path, out) {
+    for (var i = 1; i <= group.numProperties; i++) {
+        var p, here = path.concat([i]);
+        try { p = group.property(i); } catch (e) { continue; }
+        if (!p) continue;
+        if (p.propertyType === PropertyType.PROPERTY) {
+            try {
+                if (p.canSetExpression && p.expression !== "") {
+                    out.push({ path: here, text: p.expression, enabled: p.expressionEnabled });
+                }
+            } catch (e) { /* some hidden properties refuse to be read */ }
+        } else {
+            collectExpressions(p, here, out);
+        }
+    }
+    return out;
+}
+
+function propertyAtPath(layer, path) {
+    var p = layer;
+    for (var i = 0; i < path.length; i++) p = p.property(path[i]);
+    return p;
+}
+
+function restoreExpressions(layer, list) {
+    for (var i = 0; i < list.length; i++) {
+        var p = propertyAtPath(layer, list[i].path);
+        p.expression = list[i].text;
+        p.expressionEnabled = list[i].enabled;
+    }
+}
+
+/**
+ * Takes parents, expressions and track matte links off every layer in a comp
+ * (AE won't copyToComp a layer with them while an undo group is open).
+ * Returns what was removed, indexed by layer index, for reattachAfterCopy.
+ */
+function detachForCopy(sourceComp) {
+    var states = {};
+    var n = sourceComp.numLayers;
+    // Record everything before changing anything.
+    for (var i = 1; i <= n; i++) {
+        var layer = sourceComp.layer(i);
+        var s = { parent: layer.parent ? layer.parent.index : 0, matte: 0, matteType: null, expressions: [] };
+        try {
+            if (layer.hasTrackMatte && layer.trackMatteLayer) {
+                s.matte = layer.trackMatteLayer.index;
+                s.matteType = layer.trackMatteType;
+            }
+        } catch (e) { /* pre-2023 AE: mattes are positional */ }
+        s.expressions = collectExpressions(layer, [], []);
+        states[i] = s;
+    }
+    for (var j = 1; j <= n; j++) {
+        var l = sourceComp.layer(j);
+        if (states[j].parent) setParentKeepingValues(l, null);
+        if (states[j].matte) { try { l.removeTrackMatte(); } catch (e) {} }
+        for (var k = 0; k < states[j].expressions.length; k++) {
+            propertyAtPath(l, states[j].expressions[k].path).expression = "";
+        }
+    }
+    return states;
+}
+
+function reattachAfterCopy(sourceComp, states) {
+    for (var i = 1; i <= sourceComp.numLayers; i++) {
+        var layer = sourceComp.layer(i), s = states[i];
+        if (!s) continue;
+        try { restoreExpressions(layer, s.expressions); } catch (e) {}
+        try { if (s.parent) setParentKeepingValues(layer, sourceComp.layer(s.parent)); } catch (e) {}
+        try { if (s.matte) layer.setTrackMatte(sourceComp.layer(s.matte), s.matteType); } catch (e) {}
+    }
+}
+
+/** Sets a parent (or null) without AE adjusting the child's transform values. */
 function setParentKeepingValues(child, parent) {
     if (typeof child.setParentWithJump === "function") {
         child.setParentWithJump(parent);
@@ -603,11 +815,14 @@ function runAction(fnName, args) {
     }
 }
 
-function applyEase(easeKey) {
+/** mode (back eases only): "curve" = overshoot in the graph, "keys" = baked overshoot key. */
+function applyEase(easeKey, mode) {
     var comp = getActiveComp();
     if (!comp) return fail(MSG.noComp);
     var cfg = EASE_CONFIGS[easeKey];
     if (!cfg) return fail("Unknown ease: " + easeKey);
+    var useCurve = (mode === "curve");
+    var fellBack = 0, separated = 0;
 
     var isBack = easeKey.indexOf("back") === 0;
     var selections = findKeyframeSelections(comp, ["Position", "Scale", "Rotation"], isBack ? 2 : 0);
@@ -621,6 +836,11 @@ function applyEase(easeKey) {
     var done = inUndoGroup("Apply " + cfg.label + " Ease", function () {
         return eachSafely(selections, function (s) { return s.property.name; }, function (s) {
             if (isBack) {
+                if (useCurve) {
+                    if (curveOvershoot(s.property, s.keys[0], s.keys[1], easeKey)) return;
+                    if (curveOnSeparatedPosition(s.property, s.keys[0], s.keys[1], easeKey)) { separated++; return; }
+                    fellBack++;
+                }
                 bakeOvershoot(s.property, s.keys[0], s.keys[1], easeKey);
             } else {
                 var times = [];
@@ -629,7 +849,11 @@ function applyEase(easeKey) {
             }
         }, errors);
     });
-    return report("Applied " + cfg.label + " to", done, selections.length, "property(s)", errors);
+    var notes = [];
+    if (separated) notes.push("Separated Position into X/Y so the overshoot can sit in the curve.");
+    if (fellBack) notes.push(fellBack + " property(s) used Keys mode (Curve can't apply there).");
+    var note = notes.join(" ");
+    return report("Applied " + cfg.label + " to", done, selections.length, "property(s)", errors, note);
 }
 
 function applyClickAnimation() {
@@ -1156,9 +1380,10 @@ function pasteSelectedEases(eases) {
 /**
  * Replaces the selected pre-comp layer with its contents, parented to a new
  * Null that carries the pre-comp layer's transform animation. Parenting
- * between layers inside the pre-comp is preserved.
- * Not handled: time remapping/stretch on the pre-comp layer, and effects or
- * masks applied to the pre-comp layer itself.
+ * between layers inside the pre-comp is preserved, as are track mattes, the
+ * pre-comp layer's opacity (linked by expression) and its trim.
+ * Not handled (reported as warnings): time remapping/stretch on the pre-comp
+ * layer, and effects or masks applied to the pre-comp layer itself.
  */
 function deconstructPrecomp() {
     var comp = getActiveComp();
@@ -1176,6 +1401,12 @@ function deconstructPrecomp() {
     }
 
     var warnings = [];
+    // Things on the pre-comp layer that can't be carried over to the copies.
+    if (precompLayer.timeRemapEnabled) warnings.push("time remapping ignored");
+    if (precompLayer.stretch !== 100) warnings.push("time stretch ignored");
+    try { if (precompLayer.property("ADBE Effect Parade").numProperties > 0) warnings.push("effects on the pre-comp layer dropped"); } catch (e) {}
+    try { if (precompLayer.property("ADBE Mask Parade").numProperties > 0) warnings.push("masks on the pre-comp layer dropped"); } catch (e) {}
+
     inUndoGroup("De-Comp \"" + precompLayer.name + "\"", function () {
         // 1. Null controller that takes over the pre-comp layer's transform.
         var controller = comp.layers.addNull(comp.duration);
@@ -1195,35 +1426,85 @@ function deconstructPrecomp() {
             }
         }
 
-        // 2. Copy each layer out, keeping stack order. copyToComp doesn't
-        //    return the new layer, so find it by diffing layer IDs.
+        // 2. Copy each layer out, keeping stack order. Inside an undo group,
+        //    AE refuses to copy a layer that has a parent, expressions or (2023+)
+        //    a track matte link, so those are taken off the originals first,
+        //    put back on the copies, and always restored on the originals.
+        var n = sourceComp.numLayers;
+        var states = detachForCopy(sourceComp);
         var copies = {}; // source layer index -> copied layer
-        var last = controller;
-        for (var j = 1; j <= sourceComp.numLayers; j++) {
-            var original = sourceComp.layer(j);
-            var before = {};
-            for (var a = 1; a <= comp.numLayers; a++) before[comp.layer(a).id] = true;
+        try {
+            var last = controller;
+            for (var j = 1; j <= n; j++) {
+                var original = sourceComp.layer(j);
+                var before = {};
+                for (var a = 1; a <= comp.numLayers; a++) before[comp.layer(a).id] = true;
 
-            original.copyToComp(comp);
+                original.copyToComp(comp);
 
-            var copy = null;
-            for (var b = 1; b <= comp.numLayers; b++) {
-                if (!before[comp.layer(b).id]) { copy = comp.layer(b); break; }
+                // copyToComp doesn't return the new layer: find it by ID.
+                var copy = null;
+                for (var b = 1; b <= comp.numLayers; b++) {
+                    if (!before[comp.layer(b).id]) { copy = comp.layer(b); break; }
+                }
+                if (!copy) throw new Error("Couldn't find the copy of \"" + original.name + "\".");
+
+                copy.moveAfter(last);
+                copy.startTime = original.startTime + precompLayer.startTime;
+                copies[j] = copy;
+                last = copy;
             }
-            if (!copy) throw new Error("Couldn't find the copy of \"" + original.name + "\".");
 
-            copy.moveAfter(last);
-            copy.startTime = original.startTime + precompLayer.startTime;
-            copies[j] = copy;
-            last = copy;
+            // 3. Re-create parenting: inner parents map to their copies,
+            //    top-level layers go under the controller. Values are kept
+            //    as-is, since they're already relative to the right parent space.
+            for (var c = 1; c <= n; c++) {
+                var p = states[c].parent;
+                setParentKeepingValues(copies[c], p ? copies[p] : controller);
+            }
+
+            // 4. Expressions and track mattes onto the copies.
+            for (var m = 1; m <= n; m++) {
+                restoreExpressions(copies[m], states[m].expressions);
+                if (states[m].matte) {
+                    try { copies[m].setTrackMatte(copies[states[m].matte], states[m].matteType); } catch (e) {}
+                }
+            }
+        } catch (err) {
+            // Leave the comp as it was: no half-finished de-comp.
+            for (var r = n; r >= 1; r--) { try { if (copies[r]) copies[r].remove(); } catch (e) {} }
+            try { controller.remove(); } catch (e) {}
+            throw err;
+        } finally {
+            reattachAfterCopy(sourceComp, states);
         }
 
-        // 3. Re-create parenting: inner parents map to their copies, top-level
-        //    layers go under the controller. Values are kept as-is, since
-        //    they're already relative to the right parent space.
-        for (var c = 1; c <= sourceComp.numLayers; c++) {
-            var innerParent = sourceComp.layer(c).parent;
-            setParentKeepingValues(copies[c], innerParent ? copies[innerParent.index] : controller);
+        // 5. Opacity doesn't pass through parenting, so the controller's
+        //    opacity is multiplied in on every copy (only if it isn't a flat 100%).
+        var ctrlOpacity = dstTg.property("ADBE Opacity");
+        if (ctrlOpacity.numKeys > 0 || ctrlOpacity.value !== 100 || ctrlOpacity.expression) {
+            var quoted = '"' + controller.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+            var link = "value * thisComp.layer(" + quoted + ").transform.opacity / 100";
+            var skipped = [];
+            for (var o = 1; o <= sourceComp.numLayers; o++) {
+                var op = copies[o].property("ADBE Transform Group").property("ADBE Opacity");
+                if (op.expression) { skipped.push(copies[o].name); continue; }
+                op.expression = link;
+            }
+            if (skipped.length) warnings.push("opacity not linked (already has an expression): " + skipped.join(", "));
+        }
+
+        // 6. Respect the pre-comp layer's trim: nothing shows outside it.
+        var trimIn = precompLayer.inPoint, trimOut = precompLayer.outPoint;
+        for (var t = 1; t <= sourceComp.numLayers; t++) {
+            var cp = copies[t];
+            var newIn = Math.max(cp.inPoint, trimIn), newOut = Math.min(cp.outPoint, trimOut);
+            if (newIn < newOut) {
+                cp.inPoint = newIn;
+                cp.outPoint = newOut;
+            } else {
+                cp.enabled = false; // entirely outside the trim; kept in case it's a parent
+            }
         }
 
         precompLayer.remove();
