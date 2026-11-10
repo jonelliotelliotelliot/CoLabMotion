@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    CoLab Motion. Bundle and extension IDs differ from Wave Motion's so both
+    panels can be installed side by side.
+    Node.js is intentionally not enabled (the panel never uses it), which keeps
+    the panel's web view sandboxed.
+-->
+<ExtensionManifest Version="6.0" ExtensionBundleId="com.colabmotion.panel" ExtensionBundleVersion="1.3.1" ExtensionBundleName="CoLab Motion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <ExtensionList>
+        <Extension Id="com.colabmotion.panel.main" Version="1.3.1" />
+    </ExtensionList>
+    <ExecutionEnvironment>
+        <HostList>
+            <Host Name="AEFT" Version="[0.0,99.9]" />
+        </HostList>
+        <LocaleList>
+            <Locale Code="All" />
+        </LocaleList>
+        <RequiredRuntimeList>
+            <RequiredRuntime Name="CSXS" Version="12.0" />
+        </RequiredRuntimeList>
+    </ExecutionEnvironment>
+    <DispatchInfoList>
+        <Extension Id="com.colabmotion.panel.main">
+            <DispatchInfo>
+                <Resources>
+                    <MainPath>./index.html</MainPath>
+                    <ScriptPath>./jsx/colab-motion.jsx</ScriptPath>
+                </Resources>
+                <Lifecycle>
+                    <AutoVisible>true</AutoVisible>
+                </Lifecycle>
+                <UI>
+                    <Type>Panel</Type>
+                    <Menu>CoLab Motion</Menu>
+                    <Geometry>
+                        <Size>
+                            <Height>640</Height>
+                            <Width>300</Width>
+                        </Size>
+                        <MinSize>
+                            <Height>400</Height>
+                            <Width>220</Width>
+                        </MinSize>
+                        <MaxSize>
+                            <Height>1400</Height>
+                            <Width>800</Width>
+                        </MaxSize>
+                    </Geometry>
+                    <Icons/>
+                </UI>
+            </DispatchInfo>
+        </Extension>
+    </DispatchInfoList>
+</ExtensionManifest>

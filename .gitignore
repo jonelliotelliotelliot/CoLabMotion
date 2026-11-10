@@ -1,0 +1,5 @@
+.DS_Store
+dist/
+*.zxp
+*.p12
+ZXPSignCmd*
