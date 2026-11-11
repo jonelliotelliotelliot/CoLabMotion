@@ -24,7 +24,7 @@
 
 var CONFIG = {
     name: "CoLab Motion",
-    version: "1.4.1",
+    version: "1.5.1",
     assetFile: "colab-elements.aep",
     assetsFolderName: "CoLab Motion Assets",
     animatorPrefix: "CoLab"
@@ -33,7 +33,8 @@ var CONFIG = {
 var MSG = {
     noComp: "Open or select a composition first.",
     noLayer: "Select at least one layer.",
-    oneTextLayer: "Select exactly one text layer."
+    oneTextLayer: "Select exactly one text layer.",
+    noKeys: "Select some keyframes first."
 };
 
 var EASE_CONFIGS = {
@@ -256,7 +257,8 @@ function findKeyframeSelections(comp, kinds, requiredKeyCount) {
         var selectedProps = selectedLayers[i].selectedProperties;
         for (var j = 0; j < selectedProps.length; j++) {
             var prop = selectedProps[j];
-            if (prop.propertyType !== PropertyType.PROPERTY || !isTransformPropertyOfKind(prop, kinds)) continue;
+            // kinds = null accepts any keyframed property.
+            if (prop.propertyType !== PropertyType.PROPERTY || (kinds && !isTransformPropertyOfKind(prop, kinds))) continue;
             var keys = [];
             for (var k = 1; k <= prop.numKeys; k++) {
                 if (prop.keySelected(k)) keys.push(k);
@@ -825,11 +827,11 @@ function applyEase(easeKey, mode) {
     var fellBack = 0, separated = 0;
 
     var isBack = easeKey.indexOf("back") === 0;
-    var selections = findKeyframeSelections(comp, ["Position", "Scale", "Rotation"], isBack ? 2 : 0);
+    var selections = isBack
+        ? findKeyframeSelections(comp, ["Position", "Scale", "Rotation"], 2)
+        : findKeyframeSelections(comp, null, 0);
     if (selections.length === 0) {
-        return fail(isBack
-            ? "Select exactly 2 keyframes on Position, Scale or Rotation."
-            : "Select keyframes on Position, Scale or Rotation.");
+        return fail(isBack ? "Select exactly 2 keyframes on Position, Scale or Rotation." : MSG.noKeys);
     }
 
     var errors = [];
@@ -854,6 +856,178 @@ function applyEase(easeKey, mode) {
     if (fellBack) notes.push(fellBack + " property(s) used Keys mode (Curve can't apply there).");
     var note = notes.join(" ");
     return report("Applied " + cfg.label + " to", done, selections.length, "property(s)", errors, note);
+}
+
+/**
+ * Panel entry point for the Easing section.
+ * curve: "pwr1" | "pwr2" | "pwr3" | "back"
+ * direction: "in" (starts slow) | "out" (ends slow) | "inout"
+ * backMode: "curve" | "keys" (Back only)
+ */
+function applyEasing(curve, direction, backMode) {
+    if (curve === "back") {
+        var backKeys = { "in": "backIn", "out": "backOut", "inout": "backInOut" };
+        return applyEase(backKeys[direction] || "backInOut", backMode);
+    }
+    var power = { pwr1: 1, pwr2: 2, pwr3: 3 }[curve];
+    if (!power) return fail("Unknown curve: " + curve);
+    if (direction === "inout") return applyEase("easeInOutPwr" + power);
+    return applyDirectionalEase(power, direction);
+}
+
+/**
+ * One-sided ease on each selected segment (two neighbouring selected keys).
+ * "in" leaves the first key slowly and arrives at speed; "out" leaves at
+ * speed and settles into the second key. With a single key selected, "in"
+ * eases the segment leaving it and "out" the one arriving at it.
+ */
+function applyDirectionalEase(power, direction) {
+    var comp = getActiveComp();
+    if (!comp) return fail(MSG.noComp);
+    var selections = findKeyframeSelections(comp, null, 0);
+    if (selections.length === 0) return fail(MSG.noKeys);
+
+    var a = EASE_CONFIGS["easeInOutPwr" + power].specs[0].inVal / 100; // slow-side influence
+    var label = "Pwr" + power + (direction === "in" ? " In" : " Out");
+    var errors = [], segmentCount = 0;
+    var done = inUndoGroup("Apply " + label + " Ease", function () {
+        return eachSafely(selections, function (s) { return s.property.name; }, function (s) {
+            var prop = s.property, keys = s.keys, segments = [];
+            for (var i = 0; i + 1 < keys.length; i++) {
+                if (keys[i + 1] === keys[i] + 1) segments.push([keys[i], keys[i + 1]]);
+            }
+            if (keys.length === 1) {
+                var k = keys[0];
+                if (direction === "in" && k < prop.numKeys) segments.push([k, k + 1]);
+                if (direction === "out" && k > 1) segments.push([k - 1, k]);
+            }
+            if (segments.length === 0) throw new Error("no segment to ease (select neighbouring keys)");
+            for (var j = 0; j < segments.length; j++) {
+                directionalSegment(prop, segments[j][0], segments[j][1], direction, a);
+                segmentCount++;
+            }
+        }, errors);
+    });
+    return report("Applied " + label + " to", done, selections.length,
+        "property(s) (" + segmentCount + " segment(s))", errors);
+}
+
+/**
+ * The slow side is flat with influence a; the fast side's handle continues
+ * the line from the slow handle to the far key, so the curve stays smooth
+ * and never overshoots (cubic-bezier(a, 0, a + (1-a)/3, 1/3) for "in").
+ */
+function directionalSegment(prop, k1, k2, direction, a) {
+    var t1 = prop.keyTime(k1), t2 = prop.keyTime(k2), dt = t2 - t1;
+    var v1 = prop.keyValue(k1), v2 = prop.keyValue(k2);
+    var dims = easeDimensions(prop, k1);
+    var fast = [];
+    if (isSpatial(prop)) {
+        // One speed along the motion path: use the straight-line distance.
+        var sum = 0;
+        for (var d = 0; d < v1.length; d++) sum += (v2[d] - v1[d]) * (v2[d] - v1[d]);
+        fast.push(Math.sqrt(sum) / ((1 - a) * dt));
+    } else {
+        for (var e = 0; e < dims; e++) {
+            var delta = (v1 instanceof Array) ? (v2[e] - v1[e]) : (v2 - v1);
+            fast.push(delta / ((1 - a) * dt));
+        }
+    }
+    var slowInf = a * 100;
+    var fastInf = Math.max((2 / 3) * (1 - a) * 100, 0.1);
+    if (direction === "in") {
+        setSegmentEase(prop, k1, k2, easesFor(zeros(dims), slowInf), easesFor(fast, fastInf));
+    } else {
+        setSegmentEase(prop, k1, k2, easesFor(fast, fastInf), easesFor(zeros(dims), slowInf));
+    }
+}
+
+// -----------------------------------------------------------------------------
+// FLATTEN
+// -----------------------------------------------------------------------------
+
+function zeroVector(v) {
+    var out = [];
+    for (var i = 0; i < v.length; i++) out.push(0);
+    return out;
+}
+
+function sameValue(a, b) {
+    var tol = 1e-4;
+    if (a instanceof Array) {
+        for (var i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > tol) return false;
+        return true;
+    }
+    return Math.abs(a - b) <= tol;
+}
+
+/** Influence of each KeyframeEase in `eases`, never below AE's 0.1 minimum. */
+function influencesOf(eases) {
+    var out = [];
+    for (var i = 0; i < eases.length; i++) out.push(Math.max(eases[i].influence, 0.1));
+    return out;
+}
+
+function stillEases(eases) {
+    var inf = influencesOf(eases), out = [];
+    for (var i = 0; i < inf.length; i++) out.push(new KeyframeEase(0, inf[i]));
+    return out;
+}
+
+/**
+ * Removes drift between each pair of neighbouring selected keyframes: the
+ * speed leaving the first and arriving at the second is set to zero, and on
+ * Position the motion-path handles between them are flattened. A hold (same
+ * value on both keys) becomes perfectly still; a move becomes a clean ease
+ * with no overshoot. Influences, values and the easing outside the pair are
+ * left alone.
+ */
+function flattenKeys() {
+    var comp = getActiveComp();
+    if (!comp) return fail(MSG.noComp);
+    var selections = findKeyframeSelections(comp, null, 0);
+    if (selections.length === 0) return fail(MSG.noKeys);
+
+    var BEZ = KeyframeInterpolationType.BEZIER, HOLD = KeyframeInterpolationType.HOLD;
+    var errors = [], pairs = 0, moving = 0;
+    var done = inUndoGroup("Flatten Keyframes", function () {
+        return eachSafely(selections, function (s) { return s.property.name; }, function (s) {
+            var p = s.property, keys = s.keys, flattened = 0;
+            for (var n = 0; n + 1 < keys.length; n++) {
+                var k1 = keys[n], k2 = keys[n + 1];
+                if (k2 !== k1 + 1) continue;   // only neighbouring keys
+                flattened++;
+                if (!sameValue(p.keyValue(k1), p.keyValue(k2))) moving++;
+                try { p.setRovingAtKey(k1, false); p.setRovingAtKey(k2, false); } catch (e) {}
+                if (p.keyOutInterpolationType(k1) !== HOLD) {
+                    var pair = [k1, k2];
+                    for (var i = 0; i < pair.length; i++) {
+                        try { p.setTemporalAutoBezierAtKey(pair[i], false); } catch (e) {}
+                        try { p.setTemporalContinuousAtKey(pair[i], false); } catch (e) {}
+                    }
+                    try {
+                        p.setInterpolationTypeAtKey(k1, p.keyInInterpolationType(k1), BEZ);
+                        p.setInterpolationTypeAtKey(k2, BEZ, p.keyOutInterpolationType(k2));
+                        p.setTemporalEaseAtKey(k1, p.keyInTemporalEase(k1), stillEases(p.keyOutTemporalEase(k1)));
+                        p.setTemporalEaseAtKey(k2, stillEases(p.keyInTemporalEase(k2)), p.keyOutTemporalEase(k2));
+                    } catch (e) { /* hold-only properties (e.g. Source Text) are already still */ }
+                }
+                if (p.isSpatial) {
+                    try {
+                        p.setSpatialAutoBezierAtKey(k1, false); p.setSpatialContinuousAtKey(k1, false);
+                        p.setSpatialAutoBezierAtKey(k2, false); p.setSpatialContinuousAtKey(k2, false);
+                        var zero = zeroVector(p.keyOutSpatialTangent(k1));
+                        p.setSpatialTangentsAtKey(k1, p.keyInSpatialTangent(k1), zero);
+                        p.setSpatialTangentsAtKey(k2, zero, p.keyOutSpatialTangent(k2));
+                    } catch (e) {}
+                }
+            }
+            if (flattened === 0) throw new Error("select at least 2 neighbouring keyframes");
+            pairs += flattened;
+        }, errors);
+    });
+    var note = moving ? moving + " pair(s) have different values, so they still move, but without overshoot." : "";
+    return report("Flattened " + pairs + " keyframe pair(s) on", done, selections.length, "property(s)", errors, note);
 }
 
 function applyClickAnimation() {

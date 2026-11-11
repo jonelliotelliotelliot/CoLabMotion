@@ -166,6 +166,19 @@
         .segmented button[aria-pressed="true"] { background: var(--colab-purple); color: var(--text); }
         .segmented button:focus-visible { outline: 2px solid var(--colab-light-blue); outline-offset: -2px; }
 
+        /* Easing: four curve buttons that draw their own shape */
+        .curve-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+        .curve-btn {
+            height: auto; padding: 5px 0 4px;
+            display: flex; flex-direction: column; align-items: center; gap: 1px;
+            font-size: 10px; color: var(--muted);
+        }
+        .curve-btn svg { width: 100%; max-width: 40px; height: 26px; overflow: visible; }
+        .curve-btn path { fill: none; stroke: var(--colab-light-blue); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+        .curve-btn:hover, .curve-btn:active { color: var(--text); }
+        .curve-btn:hover path, .curve-btn:active path { stroke: var(--text); }
+        .sub-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: space-between; margin-top: 8px; font-size: 10px; color: var(--muted); }
+
         /* Anchor + Align grids */
         .anchor-align-row { display: flex; flex-wrap: wrap; gap: 18px; }
         .anchor-grid, .align-grid {
@@ -234,32 +247,45 @@
     <div class="section">
         <div class="title-row">
             <div class="section-title-container">
-                <div class="section-icon"><img src="icons/back-icon.png" alt=""></div>
-                <div class="section-title">Back Easing</div>
+                <div class="section-icon"><img src="icons/ease-icon.png" alt=""></div>
+                <div class="section-title">Easing</div>
             </div>
-            <div class="segmented" id="back-mode" role="group" aria-label="Back easing method">
-                <button data-mode="curve" aria-pressed="true"
-                        title="Overshoot in the Graph Editor handles: no extra keyframe (Back In/Out adds one at the midpoint). Linked Position is separated into X/Y Position.">Curve</button>
-                <button data-mode="keys" aria-pressed="false"
-                        title="Bakes the overshoot as its own keyframe (the original method). Works on any property.">Keys</button>
+            <div class="segmented" id="ease-dir" role="group" aria-label="Ease direction">
+                <button data-dir="in" aria-pressed="false" title="Ease in: starts slow, arrives at speed">In</button>
+                <button data-dir="out" aria-pressed="false" title="Ease out: leaves at speed, settles slowly">Out</button>
+                <button data-dir="inout" aria-pressed="true" title="Ease in and out: slow at both ends">In/Out</button>
             </div>
         </div>
-        <div class="button-row">
-            <button class="btn btn-flex" data-ease="backIn">Back In</button>
-            <button class="btn btn-flex" data-ease="backOut">Back Out</button>
-            <button class="btn btn-flex" data-ease="backInOut">Back In/Out</button>
+        <!-- Each button draws its curve; paths are filled in from CURVE_PATHS for the chosen direction. -->
+        <div class="curve-grid" id="curve-grid">
+            <button class="btn curve-btn" data-curve="pwr1"><svg viewBox="0 0 40 30" aria-hidden="true"><path/></svg><span>Pwr1</span></button>
+            <button class="btn curve-btn" data-curve="pwr2"><svg viewBox="0 0 40 30" aria-hidden="true"><path/></svg><span>Pwr2</span></button>
+            <button class="btn curve-btn" data-curve="pwr3"><svg viewBox="0 0 40 30" aria-hidden="true"><path/></svg><span>Pwr3</span></button>
+            <button class="btn curve-btn" data-curve="back"><svg viewBox="0 0 40 30" aria-hidden="true"><path/></svg><span>Back</span></button>
+        </div>
+        <div class="sub-row">
+            <span>Back method</span>
+            <div class="segmented" id="back-mode" role="group" aria-label="Back easing method">
+                <button data-mode="keys" aria-pressed="true"
+                        title="Bakes the overshoot as its own keyframe (the original method). Works on any property.">Keys</button>
+                <button data-mode="curve" aria-pressed="false"
+                        title="Overshoot in the Graph Editor handles: no extra keyframe (Back In/Out adds one at the midpoint). Linked Position is separated into X/Y Position.">Curve</button>
+            </div>
         </div>
     </div>
 
     <div class="section">
         <div class="section-title-container">
-            <div class="section-icon"><img src="icons/ease-icon.png" alt=""></div>
-            <div class="section-title">Generic Eases</div>
+            <div class="section-icon"><img src="icons/back-icon.png" alt=""></div>
+            <div class="section-title">Timing</div>
         </div>
         <div class="button-row">
-            <button class="btn btn-flex" data-ease="easeInOutPwr3">InOut Pwr3</button>
-            <button class="btn btn-flex" data-ease="easeInOutPwr2">InOut Pwr2</button>
-            <button class="btn btn-flex" data-ease="easeInOutPwr1">InOut Pwr1</button>
+            <button class="btn btn-flex" id="btnFlatten"
+                    title="Select 2 or more keyframes: removes drift and overshoot between neighbouring keys, so holds stay still. Values are unchanged.">Flatten</button>
+        </div>
+        <div class="button-row">
+            <button class="btn btn-flex" id="btnCopyEase" title="Copy the easing of the selected keyframes">Copy Ease</button>
+            <button class="btn btn-flex" id="btnPasteEase" title="Paste copied easing onto the selected keyframes">Paste Ease</button>
         </div>
     </div>
 
@@ -354,9 +380,8 @@
             <button class="btn btn-full-width" data-action="createFullCompRectangle">Create Full-Comp Rectangle</button>
         </div>
         <div class="button-row">
-            <button class="btn btn-flex" id="btnCopyEase" title="Copy the easing of the selected keyframes">Copy Ease</button>
-            <button class="btn btn-flex" id="btnPasteEase" title="Paste copied easing onto the selected keyframes">Paste Ease</button>
-            <button class="btn btn-flex" data-action="deconstructPrecomp">De-Comp</button>
+            <button class="btn btn-full-width" data-action="deconstructPrecomp"
+                    title="Replaces the selected pre-comp with its layers, parented to a null that carries its animation">De-Comp</button>
         </div>
     </div>
 
@@ -372,7 +397,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.4.1';
+    const VERSION = '1.5.1';
     const csInterface = new CSInterface();
 
     // ---------------------------------------------------------------------
@@ -470,20 +495,66 @@
         document.querySelectorAll(selector).forEach((el) => el.addEventListener('click', () => handler(el)));
     }
 
-    // Back easing method toggle (remembered per machine; falls back to Curve).
-    let backMode = 'curve';
-    try { backMode = localStorage.getItem('colab.backMode') || 'curve'; } catch (e) { /* storage unavailable */ }
+    // Back easing method toggle (remembered per machine; falls back to Keys).
+    // New storage key, so the Curve default saved by v1.5.0 doesn't stick.
+    let backMode = 'keys';
+    try { backMode = localStorage.getItem('colab.backMethod') || 'keys'; } catch (e) { /* storage unavailable */ }
     function setBackMode(mode) {
         backMode = mode;
         document.querySelectorAll('#back-mode button').forEach((b) => {
             b.setAttribute('aria-pressed', String(b.dataset.mode === mode));
         });
-        try { localStorage.setItem('colab.backMode', mode); } catch (e) { /* storage unavailable */ }
+        try { localStorage.setItem('colab.backMethod', mode); } catch (e) { /* storage unavailable */ }
     }
     bindAll('#back-mode button', (el) => setBackMode(el.dataset.mode));
     setBackMode(backMode);
 
-    bindAll('[data-ease]',   (el) => callJsx('applyEase', [el.dataset.ease, backMode]));
+    // Ease direction toggle + curve buttons. Glyphs are the actual curves
+    // (time left to right, value bottom to top) in a 40x30 box, from
+    // (4,24) to (36,6), with room above and below for Back's overshoot.
+    const CURVE_PATHS = {
+        inout: {
+            pwr1: 'M4 24 C14.6 24 25.4 6 36 6',
+            pwr2: 'M4 24 C25.1 24 14.9 6 36 6',
+            pwr3: 'M4 24 C32.2 24 7.8 6 36 6',
+            back: 'M4 24 C13.6 24 13.6 32.1 20 15 C26.4 -2.1 26.4 6 36 6'
+        },
+        in: {
+            pwr1: 'M4 24 C14.6 24 21.7 18 36 6',
+            pwr2: 'M4 24 C25.1 24 28.7 18 36 6',
+            pwr3: 'M4 24 C32.2 24 33.4 18 36 6',
+            back: 'M4 24 C23.2 24 23.2 34.2 36 6'
+        },
+        out: {
+            pwr1: 'M4 24 C18.3 12 25.4 6 36 6',
+            pwr2: 'M4 24 C11.3 12 14.9 6 36 6',
+            pwr3: 'M4 24 C6.6 12 7.8 6 36 6',
+            back: 'M4 24 C16.8 -4.2 16.8 6 36 6'
+        }
+    };
+    const DIR_WORDS = { in: 'ease in (starts slow)', out: 'ease out (ends slow)', inout: 'ease in/out' };
+    const CURVE_NAMES = { pwr1: 'Pwr1', pwr2: 'Pwr2', pwr3: 'Pwr3', back: 'Back' };
+
+    let easeDir = 'inout';
+    try { easeDir = localStorage.getItem('colab.easeDir') || 'inout'; } catch (e) { /* storage unavailable */ }
+    if (!CURVE_PATHS[easeDir]) easeDir = 'inout';
+    function setEaseDir(dir) {
+        easeDir = dir;
+        document.querySelectorAll('#ease-dir button').forEach((b) => {
+            b.setAttribute('aria-pressed', String(b.dataset.dir === dir));
+        });
+        document.querySelectorAll('.curve-btn').forEach((b) => {
+            b.querySelector('path').setAttribute('d', CURVE_PATHS[dir][b.dataset.curve]);
+            b.title = CURVE_NAMES[b.dataset.curve] + ' ' + DIR_WORDS[dir] +
+                (b.dataset.curve === 'back' ? ' (select 2 keys)' : ' on the selected keys');
+        });
+        try { localStorage.setItem('colab.easeDir', dir); } catch (e) { /* storage unavailable */ }
+    }
+    bindAll('#ease-dir button', (el) => setEaseDir(el.dataset.dir));
+    setEaseDir(easeDir);
+    bindAll('.curve-btn', (el) => callJsx('applyEasing', [el.dataset.curve, easeDir, backMode]));
+
+    document.getElementById('btnFlatten').addEventListener('click', () => callJsx('flattenKeys', []));
     bindAll('[data-anchor]', (el) => callJsx('repositionAnchor', [el.dataset.anchor]));
     bindAll('[data-align]',  (el) => callJsx('alignLayers', [el.dataset.align]));
     bindAll('[data-action]', (el) => callJsx(el.dataset.action, []));

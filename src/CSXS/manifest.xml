@@ -5,9 +5,9 @@
     Node.js is intentionally not enabled (the panel never uses it), which keeps
     the panel's web view sandboxed.
 -->
-<ExtensionManifest Version="6.0" ExtensionBundleId="com.colabmotion.panel" ExtensionBundleVersion="1.4.1" ExtensionBundleName="CoLab Motion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<ExtensionManifest Version="6.0" ExtensionBundleId="com.colabmotion.panel" ExtensionBundleVersion="1.5.1" ExtensionBundleName="CoLab Motion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
     <ExtensionList>
-        <Extension Id="com.colabmotion.panel.main" Version="1.4.1" />
+        <Extension Id="com.colabmotion.panel.main" Version="1.5.1" />
     </ExtensionList>
     <ExecutionEnvironment>
         <HostList>
