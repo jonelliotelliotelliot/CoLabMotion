@@ -24,7 +24,7 @@
 
 var CONFIG = {
     name: "CoLab Motion",
-    version: "1.5.1",
+    version: "1.6.0",
     assetFile: "colab-elements.aep",
     assetsFolderName: "CoLab Motion Assets",
     animatorPrefix: "CoLab"
@@ -216,19 +216,20 @@ function setUniformEase(prop, keyIndex, speed, inInfluence, outInfluence) {
 }
 
 /** Shifts a property's static value, or every keyframe, by a per-axis delta. */
+function shiftedXY(v, dx, dy) {
+    var out = copyArray(v);
+    out[0] += dx;
+    out[1] += dy;
+    return out;
+}
+
 function offsetPositionBy(positionProp, dx, dy) {
-    function shifted(v) {
-        var out = copyArray(v);
-        out[0] += dx;
-        out[1] += dy;
-        return out;
-    }
     if (positionProp.numKeys > 0) {
         for (var k = 1; k <= positionProp.numKeys; k++) {
-            positionProp.setValueAtKey(k, shifted(positionProp.keyValue(k)));
+            positionProp.setValueAtKey(k, shiftedXY(positionProp.keyValue(k), dx, dy));
         }
     } else {
-        positionProp.setValue(shifted(positionProp.value));
+        positionProp.setValue(shiftedXY(positionProp.value, dx, dy));
     }
 }
 
@@ -487,31 +488,154 @@ function repositionAnchorForLayer(layer, time, anchorPos) {
         throw new Error("Anchor Point is keyframed; remove its keyframes first.");
     }
     anchorProp.setValue(newAnchor);
-    offsetPositionBy(layer.position,
+    offsetLayerPosition(layer,
         localDx * Math.cos(rad) - localDy * Math.sin(rad),
         localDx * Math.sin(rad) + localDy * Math.cos(rad));
 }
 
-/** Axis-aligned bounds in comp space (rotation ignored, like the anchor tool). */
-function computeLayerBoundsInComp(layer, time) {
-    var rect = layer.sourceRectAtTime(time, false);
-    var anchor = layer.anchorPoint.value;
-    var position = layer.position.value;
-    var scale = layer.scale.value;
+// 2D affine matrices [a, b, c, d, e, f]: x' = a*x + c*y + e, y' = b*x + d*y + f.
+function matMul(m, n) {
+    return [m[0] * n[0] + m[2] * n[1],          m[1] * n[0] + m[3] * n[1],
+            m[0] * n[2] + m[2] * n[3],          m[1] * n[2] + m[3] * n[3],
+            m[0] * n[4] + m[2] * n[5] + m[4],   m[1] * n[4] + m[3] * n[5] + m[5]];
+}
+
+function matApply(m, x, y) {
+    return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+}
+
+/** Position as [x, y], whether or not its dimensions are separated. */
+function positionAtTime(layer, t) {
+    var tg = layer.property("ADBE Transform Group");
+    var pos = tg.property("ADBE Position");
+    if (pos.dimensionsSeparated) {
+        return [tg.property("ADBE Position_0").valueAtTime(t, false),
+                tg.property("ADBE Position_1").valueAtTime(t, false)];
+    }
+    return pos.valueAtTime(t, false);
+}
+
+/**
+ * Layer space -> its comp's space at time t, through every parent. 2D only:
+ * 3D X/Y rotation, orientation and cameras are ignored.
+ */
+function layerToCompMatrix(layer, t) {
+    var tg = layer.property("ADBE Transform Group");
+    var anchor = tg.property("ADBE Anchor Point").valueAtTime(t, false);
+    var pos = positionAtTime(layer, t);
+    var scale = tg.property("ADBE Scale").valueAtTime(t, false);
+    var rad = 0;
+    try { rad = tg.property("ADBE Rotate Z").valueAtTime(t, false) * Math.PI / 180; } catch (e) {}
     var sx = scale[0] / 100, sy = scale[1] / 100;
-    var xs = [rect.left, rect.left + rect.width], ys = [rect.top, rect.top + rect.height];
-    var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (var i = 0; i < 2; i++) {
-        for (var j = 0; j < 2; j++) {
-            var cx = position[0] + (xs[i] - anchor[0]) * sx;
-            var cy = position[1] + (ys[j] - anchor[1]) * sy;
-            if (cx < minX) minX = cx;
-            if (cx > maxX) maxX = cx;
-            if (cy < minY) minY = cy;
-            if (cy > maxY) maxY = cy;
+    var cos = Math.cos(rad), sin = Math.sin(rad);
+    // T(pos) * R(rot) * S(scale) * T(-anchor)
+    var m = [cos * sx, sin * sx, -sin * sy, cos * sy, 0, 0];
+    var off = matApply(m, -anchor[0], -anchor[1]);
+    m[4] = off[0] + pos[0];
+    m[5] = off[1] + pos[1];
+    if (layer.parent) m = matMul(layerToCompMatrix(layer.parent, t), m);
+    return m;
+}
+
+/** Time inside a precomp layer's source at comp time t. */
+function sourceTimeOf(layer, t) {
+    if (layer.timeRemapEnabled) return layer.property("ADBE Time Remapping").valueAtTime(t, false);
+    return (t - layer.startTime) * 100 / layer.stretch;
+}
+
+function unionRect(r, pts) {
+    for (var i = 0; i < pts.length; i++) {
+        if (!r) r = { left: pts[i][0], right: pts[i][0], top: pts[i][1], bottom: pts[i][1] };
+        r.left = Math.min(r.left, pts[i][0]); r.right = Math.max(r.right, pts[i][0]);
+        r.top = Math.min(r.top, pts[i][1]);   r.bottom = Math.max(r.bottom, pts[i][1]);
+    }
+    return r;
+}
+
+function cornersThrough(m, rect) {
+    var x0 = rect.left, x1 = rect.left + rect.width, y0 = rect.top, y1 = rect.top + rect.height;
+    return [matApply(m, x0, y0), matApply(m, x1, y0), matApply(m, x0, y1), matApply(m, x1, y1)];
+}
+
+/** Bounds of everything visible in `comp` at time t, in its own space, or null. */
+function compContentBounds(comp, t, depth) {
+    var r = null;
+    for (var i = 1; i <= comp.numLayers; i++) {
+        var l = comp.layer(i);
+        if (!(l instanceof AVLayer) && !(l instanceof ShapeLayer) && !(l instanceof TextLayer)) continue;
+        try {
+            if (!l.enabled || !l.hasVideo || l.guideLayer || l.nullLayer || l.adjustmentLayer) continue;
+            if (l.isTrackMatte) continue;
+        } catch (e) {}
+        if (t < l.inPoint || t >= l.outPoint) continue;
+        var rect = layerContentRect(l, t, depth);
+        if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+        r = unionRect(r, cornersThrough(layerToCompMatrix(l, t), rect));
+    }
+    return r;
+}
+
+/**
+ * The part of a layer that actually draws, in layer space. A precomp layer's
+ * frame is usually the full comp, so use the content inside it instead.
+ */
+function layerContentRect(layer, t, depth) {
+    var src = null;
+    try { src = layer.source; } catch (e) {}
+    if (src instanceof CompItem && depth < 5) {
+        var b = compContentBounds(src, sourceTimeOf(layer, t), depth + 1);
+        if (b) {
+            if (!layer.collapseTransformation) {
+                // Outside the precomp's frame is cropped.
+                b = { left: Math.max(b.left, 0), right: Math.min(b.right, src.width),
+                      top: Math.max(b.top, 0),   bottom: Math.min(b.bottom, src.height) };
+                if (b.right <= b.left || b.bottom <= b.top) return null;
+            }
+            return { left: b.left, top: b.top, width: b.right - b.left, height: b.bottom - b.top };
         }
     }
-    return { left: minX, right: maxX, top: minY, bottom: maxY };
+    return layer.sourceRectAtTime(t, false);
+}
+
+/** Axis-aligned bounds of the layer's visible content in comp space. */
+function computeLayerBoundsInComp(layer, time) {
+    var rect = layerContentRect(layer, time, 0);
+    if (!rect) throw new Error("nothing visible at the current time");
+    return unionRect(null, cornersThrough(layerToCompMatrix(layer, time), rect));
+}
+
+/**
+ * Moves the layer by (dx, dy) in comp space: converts through the parent's
+ * transform, and handles separated X/Y Position.
+ */
+function moveLayerInComp(layer, dx, dy, time) {
+    if (layer.parent) {
+        var p = layerToCompMatrix(layer.parent, time);
+        var det = p[0] * p[3] - p[2] * p[1];
+        if (Math.abs(det) < 1e-9) throw new Error("parent is scaled to 0");
+        var lx = (p[3] * dx - p[2] * dy) / det, ly = (-p[1] * dx + p[0] * dy) / det;
+        dx = lx; dy = ly;
+    }
+    offsetLayerPosition(layer, dx, dy);
+}
+
+/** Offsets Position (in its parent's space), whether or not X/Y are separated. */
+function offsetLayerPosition(layer, dx, dy) {
+    var tg = layer.property("ADBE Transform Group");
+    var pos = tg.property("ADBE Position");
+    if (pos.dimensionsSeparated) {
+        var axes = [[tg.property("ADBE Position_0"), dx], [tg.property("ADBE Position_1"), dy]];
+        for (var i = 0; i < axes.length; i++) {
+            var prop = axes[i][0], d = axes[i][1];
+            if (prop.numKeys > 0) {
+                for (var k = 1; k <= prop.numKeys; k++) prop.setValueAtKey(k, prop.keyValue(k) + d);
+            } else {
+                prop.setValue(prop.value + d);
+            }
+        }
+    } else {
+        offsetPositionBy(pos, dx, dy);
+    }
 }
 
 function alignLayerToComp(layer, comp, alignType) {
@@ -524,7 +648,17 @@ function alignLayerToComp(layer, comp, alignType) {
     else if (alignType === "centerV") dy = comp.height / 2 - (b.top + b.bottom) / 2;
     else if (alignType === "bottom") dy = comp.height - b.bottom;
     else throw new Error("Unknown align type: " + alignType);
-    offsetPositionBy(layer.position, dx, dy);
+    moveLayerInComp(layer, dx, dy, comp.time);
+}
+
+function hasPositionExpression(layer) {
+    var tg = layer.property("ADBE Transform Group");
+    var props = [tg.property("ADBE Position")];
+    if (props[0].dimensionsSeparated) props = [tg.property("ADBE Position_0"), tg.property("ADBE Position_1")];
+    for (var i = 0; i < props.length; i++) {
+        try { if (props[i].expressionEnabled && props[i].expression !== "") return true; } catch (e) {}
+    }
+    return false;
 }
 
 
@@ -1297,13 +1431,86 @@ function alignLayers(alignType) {
     var layers = comp.selectedLayers;
     if (layers.length === 0) return fail(MSG.noLayer);
 
-    var errors = [];
+    var errors = [], expressions = 0;
     var done = inUndoGroup("Align Layers to Composition", function () {
         return eachSafely(layers, layerName, function (layer) {
             alignLayerToComp(layer, comp, alignType);
+            if (hasPositionExpression(layer)) expressions++;
         }, errors);
     });
-    return report("Aligned", done, layers.length, "layer(s)", errors);
+    var note = expressions ? expressions + " layer(s) have a Position expression, which may override the move." : "";
+    return report("Aligned", done, layers.length, "layer(s)", errors, note);
+}
+
+function inList(item, list) {
+    for (var i = 0; i < list.length; i++) if (list[i] === item) return true;
+    return false;
+}
+
+/**
+ * Adds a null with its anchor in its centre. With nothing selected it sits in
+ * the middle of the comp. With layers selected it sits in the middle of their
+ * combined bounds, just above the topmost one, and they're parented to it
+ * without moving. Existing parent links inside the selection are kept; if
+ * every selected root shares an outside parent, the null goes under that
+ * parent so the rig keeps working.
+ */
+function addNull() {
+    var comp = getActiveComp();
+    if (!comp) return fail(MSG.noComp);
+    var selected = [];
+    for (var s = 0; s < comp.selectedLayers.length; s++) selected.push(comp.selectedLayers[s]);
+    var topmost = getTopmostSelectedLayer(comp);
+
+    var errors = [], parented = 0, roots = [];
+    var nullLayer = inUndoGroup("Add Null", function () {
+        // Centre of the selection's combined bounds (comp centre if none).
+        var box = null;
+        for (var i = 0; i < selected.length; i++) {
+            try {
+                var b = computeLayerBoundsInComp(selected[i], comp.time);
+                box = unionRect(box, [[b.left, b.top], [b.right, b.bottom]]);
+            } catch (e) { /* cameras, lights, empty layers: no bounds */ }
+        }
+        var cx = box ? (box.left + box.right) / 2 : comp.width / 2;
+        var cy = box ? (box.top + box.bottom) / 2 : comp.height / 2;
+
+        var n = comp.layers.addNull();
+        n.name = selected.length ? "Null Control" : "Null";
+        var rect = n.sourceRectAtTime(comp.time, false);
+        n.anchorPoint.setValue([rect.left + rect.width / 2, rect.top + rect.height / 2]);
+        n.position.setValue([cx, cy]);
+        if (topmost) n.moveBefore(topmost);
+
+        // Only the top of each selected hierarchy gets the null as parent.
+        var sharedParent = null, mixed = false;
+        for (var j = 0; j < selected.length; j++) {
+            var p = selected[j].parent;
+            if (p && inList(p, selected)) continue;
+            roots.push(selected[j]);
+            if (roots.length === 1) sharedParent = p;
+            else if (p !== sharedParent) mixed = true;
+        }
+        // Setting .parent keeps the layer where it is on screen, like the pick whip.
+        if (sharedParent && !mixed) n.parent = sharedParent;
+        for (var k = 0; k < roots.length; k++) {
+            try {
+                roots[k].parent = n;
+                parented++;
+            } catch (e) {
+                errors.push(roots[k].name + ": " + e.toString());
+            }
+        }
+
+        for (var q = 0; q < selected.length; q++) selected[q].selected = false;
+        n.selected = true;
+        return n;
+    });
+
+    if (selected.length === 0) return ok("Added a null in the centre of the comp.");
+    var message = "Added \"" + nullLayer.name + "\" and parented " + parented + "/" + roots.length + " layer(s) to it.";
+    if (errors.length) message += " Errors: " + errors.join("; ");
+    return JSON.stringify({ success: parented > 0, message: message });
 }
 
 /** Full-frame black rectangle (brand background), placed above the selection. */

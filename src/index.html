@@ -380,6 +380,10 @@
             <button class="btn btn-full-width" data-action="createFullCompRectangle">Create Full-Comp Rectangle</button>
         </div>
         <div class="button-row">
+            <button class="btn btn-full-width" data-action="addNull"
+                    title="Adds a centred null. With layers selected, it goes in the middle of them and they're parented to it.">Add Null</button>
+        </div>
+        <div class="button-row">
             <button class="btn btn-full-width" data-action="deconstructPrecomp"
                     title="Replaces the selected pre-comp with its layers, parented to a null that carries its animation">De-Comp</button>
         </div>
@@ -397,7 +401,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.1';
+    const VERSION = '1.6.0';
     const csInterface = new CSInterface();
 
     // ---------------------------------------------------------------------
